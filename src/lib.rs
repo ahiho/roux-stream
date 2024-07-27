@@ -36,17 +36,18 @@ details.
 This module uses the logging infrastructure provided by the [`log`] crate.
 */
 
-#![warn(missing_docs)]
-
 use async_trait::async_trait;
+use base64::{engine, Engine};
 use futures::channel::mpsc;
 use futures::Stream;
 use futures::{Sink, SinkExt};
 use log::{debug, warn};
+
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use roux::{
+    comment::CommentData,
     response::{BasicThing, Listing},
     submission::SubmissionData,
-    comment::CommentData,
     util::RouxError,
     Subreddit,
 };
@@ -90,9 +91,7 @@ const LIMIT: u32 = 100;
 
 #[async_trait]
 impl Puller<SubmissionData, RouxError> for SubredditPuller {
-    async fn pull(
-        &mut self,
-    ) -> Result<BasicThing<Listing<BasicThing<SubmissionData>>>, RouxError> {
+    async fn pull(&mut self) -> Result<BasicThing<Listing<BasicThing<SubmissionData>>>, RouxError> {
         self.subreddit.latest(LIMIT, None).await
     }
 
@@ -111,9 +110,7 @@ impl Puller<SubmissionData, RouxError> for SubredditPuller {
 
 #[async_trait]
 impl Puller<CommentData, RouxError> for SubredditPuller {
-    async fn pull(
-        &mut self,
-    ) -> Result<BasicThing<Listing<BasicThing<CommentData>>>, RouxError> {
+    async fn pull(&mut self) -> Result<BasicThing<Listing<BasicThing<CommentData>>>, RouxError> {
         self.subreddit.latest_comments(None, Some(LIMIT)).await
     }
 
@@ -286,6 +283,7 @@ fn stream_items<R, I, T>(
     sleep_time: Duration,
     retry_strategy: R,
     timeout: Option<Duration>,
+    client: Option<&reqwest::Client>,
 ) -> (
     impl Stream<Item = Result<T, StreamError<RouxError>>>,
     JoinHandle<Result<(), mpsc::SendError>>,
@@ -300,7 +298,11 @@ where
     // We need an owned instance (or at least statically bound
     // reference) for tokio::spawn. Since Subreddit isn't Clone,
     // we simply create a new instance.
-    let subreddit = Subreddit::new(subreddit.name.as_str());
+    let subreddit = match client {
+        Some(client) => Subreddit::new_oauth(subreddit.name.as_str(), client),
+        None => Subreddit::new(subreddit.name.as_str()),
+    };
+
     let join_handle = tokio::spawn(async move {
         pull_into_sink(
             &mut SubredditPuller { subreddit },
@@ -408,6 +410,7 @@ pub fn stream_submissions<R, I>(
     sleep_time: Duration,
     retry_strategy: R,
     timeout: Option<Duration>,
+    client: Option<&reqwest::Client>,
 ) -> (
     impl Stream<Item = Result<SubmissionData, StreamError<RouxError>>>,
     JoinHandle<Result<(), mpsc::SendError>>,
@@ -416,7 +419,7 @@ where
     R: IntoIterator<IntoIter = I, Item = Duration> + Clone + Send + Sync + 'static,
     I: Iterator<Item = Duration> + Send + Sync + 'static,
 {
-    stream_items(subreddit, sleep_time, retry_strategy, timeout)
+    stream_items(subreddit, sleep_time, retry_strategy, timeout, client)
 }
 
 /**
@@ -519,6 +522,7 @@ pub fn stream_comments<R, I>(
     sleep_time: Duration,
     retry_strategy: R,
     timeout: Option<Duration>,
+    client: Option<&reqwest::Client>,
 ) -> (
     impl Stream<Item = Result<CommentData, StreamError<RouxError>>>,
     JoinHandle<Result<(), mpsc::SendError>>,
@@ -527,7 +531,7 @@ where
     R: IntoIterator<IntoIter = I, Item = Duration> + Clone + Send + Sync + 'static,
     I: Iterator<Item = Duration> + Send + Sync + 'static,
 {
-    stream_items(subreddit, sleep_time, retry_strategy, timeout)
+    stream_items(subreddit, sleep_time, retry_strategy, timeout, client)
 }
 
 #[cfg(test)]
@@ -854,4 +858,29 @@ mod tests {
         )
         .await;
     }
+}
+
+pub async fn create_client(
+    client_id: &str,
+    client_secret: &str,
+    user_agent: &str,
+) -> Result<reqwest::Client, reqwest::Error> {
+    let mut headers = HeaderMap::new();
+
+    let auth = format!("{}:{}", client_id, client_secret);
+    let auth = format!("Basic {}", engine::general_purpose::STANDARD.encode(auth));
+    headers.insert(AUTHORIZATION, HeaderValue::from_str(&auth).unwrap());
+
+    headers.insert(USER_AGENT, HeaderValue::from_str(&user_agent).unwrap());
+
+    log::debug!("Creating client with headers: {:?}", headers);
+    log::debug!("Creating client with user agent: {}", user_agent);
+    log::debug!("Creating client with client id: {}", client_id);
+    log::debug!("Creating client with client secret: {}", client_secret);
+
+    let client = reqwest::Client::builder()
+        .default_headers(headers)
+        .build()?;
+
+    Ok(client)
 }
