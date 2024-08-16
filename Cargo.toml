@@ -15,7 +15,7 @@ categories = ["api-bindings", "asynchronous"]
 async-trait = "0.1"
 futures = "0.3"
 log = "0.4"
-roux = "2"
+roux = { git = "https://github.com/ahiho/roux", branch = "master" }
 tokio = "1"
 tokio-retry = "0.3"
 reqwest = { version = "0.11", default-features = false, features = ["json"] }
